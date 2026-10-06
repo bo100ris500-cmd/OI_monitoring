@@ -1,0 +1,17 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+config.yaml
+data/
+price_cache.json
+price_cache.tmp
+*.db
+_tz_extract.txt
+result_sample*.csv
+result.csv
+result.json
+.pytest_cache/
+*.bak
+.idea/
+.vscode/

@@ -1,0 +1,118 @@
+collector:
+  interval_sec: 60
+
+windows:
+  - 1h
+  - 4h
+  - 24h
+
+history:
+  zscore_days: 14
+  minimum_days: 7
+
+resources:
+  max_memory_mb: 700
+  max_concurrent_requests: 10
+
+monitoring_mode: watchlist  # watchlist | global
+
+exchanges:
+  - binance
+  - bybit
+  - bitget
+  - hyperliquid
+  - aster
+
+normalization:
+  strip_prefixes:
+    - "1000"
+    - "10000"
+    - "1000000"
+    - "1M"
+    - "k"
+  strip_quote_suffixes:
+    - USDT
+    - USDC
+  multiplier_prefixes:
+    "1000": 1000
+    "10000": 10000
+    "1000000": 1000000
+    "1M": 1000000
+  blacklist_bases:
+    - USDT
+    - USDC
+    - BUSD
+    - DAI
+    - TUSD
+    - FDUSD
+    - USD
+  wrapped_prefixes:
+    - W
+  index_bases:
+    - DEFI
+    - ALL
+  hyperliquid_tradfi_bases:
+    - EUR
+    - GBP
+    - JPY
+    - GOLD
+    - SILVER
+    - OIL
+    - NDX
+    - SPX
+
+signals:
+  S1:
+    oi_growth_pct: 15
+    oi_percentile: 97
+    oi_z: 3
+  S2:
+    oi_deadzone_pct: 2
+    price_deadzone_pct: 0.5
+  S3:
+    ratio_max: 0.5
+    z_gap_min: 2
+  S4:
+    long_pct_min: 65
+    short_pct_max: 35
+    funding_long_min_8h: 0.05
+    funding_short_max_8h: -0.05
+  S5:
+    lookback_hours: 24
+    oi_drop_1h_pct: -10
+  S6:
+    oi_volume_percentile: 95
+  S7:
+    exchanges_required: 2
+    confirmation_window_min: 5
+
+filters:
+  F1:
+    min_oi_usd: 500000
+    min_volume_24h_usd: 5000000
+  F2:
+    minimum_history_days: 7
+  F3:
+    new_listing_days: 7
+    action: mark  # mark | exclude
+  F5:
+    stale_intervals: 2
+    max_oi_jump_ratio: 10
+    confirmation_reads: 2
+  F6:
+    cooldown_hours: 4
+    extra_growth_pct_points: 10
+  F8:
+    btc_move_pct: 3
+    market_signal_pct: 20
+
+post_factum:
+  horizons:
+    - 5m
+    - 15m
+    - 1h
+    - 4h
+    - 1d
+
+monitoring:
+  missing_data_intervals: 3

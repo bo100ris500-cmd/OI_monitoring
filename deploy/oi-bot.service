@@ -1,0 +1,33 @@
+# OI Telegram Bot — прод на Linux VPS
+# Путь установки: /opt/oi-bot
+# Пользователь: oi
+#
+# Установка:
+#   sudo cp /opt/oi-bot/deploy/oi-bot.service /etc/systemd/system/oi-bot.service
+#   sudo systemctl daemon-reload && sudo systemctl enable --now oi-bot
+#
+# Логи: journalctl -u oi-bot -f
+
+[Unit]
+Description=OI Telegram monitoring bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=oi
+Group=oi
+WorkingDirectory=/opt/oi-bot
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=-/opt/oi-bot/.env
+ExecStart=/opt/oi-bot/.venv/bin/python /opt/oi-bot/main.py
+Restart=always
+RestartSec=5
+MemoryMax=900M
+
+# Безопасность (мягкие ограничения)
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
