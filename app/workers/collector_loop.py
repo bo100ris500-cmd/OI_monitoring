@@ -21,6 +21,7 @@ from app.core.signal_manager import persist_and_notify
 from app.core.signals import evaluate_signals
 from app.core.timeutils import ensure_utc, utcnow
 from app.storage import repo
+from app.storage.db import with_db_retry
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +38,7 @@ class Pipeline:
         self.config_store = config_store
         self._http: aiohttp.ClientSession | None = None
         self._running = False
+        self._db_write_lock = asyncio.Lock()
         # recent S1 events for S7: base -> list[(ts, exchange)]
         self._recent_s1: dict[str, list[tuple[datetime, str]]] = defaultdict(list)
 
@@ -98,68 +100,87 @@ class Pipeline:
             async with sem:
                 try:
                     snaps = await coll.discover(base_set)
-                    async with self.session_factory() as session:
-                        await repo.update_exchange_health(session, name, success=True)
-                        for s in snaps:
-                            await repo.upsert_instrument(
-                                session,
-                                exchange=s.exchange,
-                                contract_symbol=s.contract_symbol,
-                                base_symbol=s.base_symbol,
-                                quote=s.quote,
-                                multiplier=s.multiplier,
-                                is_active=True,
-                            )
-                            # F5 oi jump confirmation
-                            prev = await repo.latest_tick(session, s.exchange, s.contract_symbol)
-                            if (
-                                prev
-                                and prev.oi_usd
-                                and s.oi_usd
-                                and prev.oi_usd > 0
-                                and s.oi_usd / prev.oi_usd > cfg.filters.F5.max_oi_jump_ratio
-                            ):
-                                confirmed = s
-                                for _ in range(cfg.filters.F5.confirmation_reads - 1):
-                                    await asyncio.sleep(0.5)
-                                    again = await coll.fetch_one(s.contract_symbol, s.base_symbol)
-                                    if again and again.oi_usd:
-                                        confirmed = again
-                                s = confirmed
-                            await repo.insert_tick(
-                                session,
-                                {
-                                    "exchange": s.exchange,
-                                    "contract_symbol": s.contract_symbol,
-                                    "base_symbol": s.base_symbol,
-                                    "ts_utc": s.ts_utc,
-                                    "oi_usd": s.oi_usd,
-                                    "last_price": s.last_price,
-                                    "mark_price": s.mark_price,
-                                    "funding_rate": s.funding_rate,
-                                    "volume_24h": s.volume_24h,
-                                    "long_pct": s.long_pct,
-                                    "short_pct": s.short_pct,
-                                },
-                            )
-                            async with snap_lock:
-                                snapshots.append(s)
+                    # F5: повторное чтение вне DB-lock
+                    prepared: list = []
+                    for s in snaps:
+                        need_confirm = False
+                        async with self._db_write_lock:
+                            async with self.session_factory() as session:
+                                prev = await repo.latest_tick(
+                                    session, s.exchange, s.contract_symbol
+                                )
+                                if (
+                                    prev
+                                    and prev.oi_usd
+                                    and s.oi_usd
+                                    and prev.oi_usd > 0
+                                    and s.oi_usd / prev.oi_usd
+                                    > cfg.filters.F5.max_oi_jump_ratio
+                                ):
+                                    need_confirm = True
+                        if need_confirm:
+                            confirmed = s
+                            for _ in range(cfg.filters.F5.confirmation_reads - 1):
+                                await asyncio.sleep(0.5)
+                                again = await coll.fetch_one(s.contract_symbol, s.base_symbol)
+                                if again and again.oi_usd:
+                                    confirmed = again
+                            prepared.append(confirmed)
+                        else:
+                            prepared.append(s)
+
+                    async with self._db_write_lock:
+                        async with self.session_factory() as session:
+                            await repo.update_exchange_health(session, name, success=True)
+                            for s in prepared:
+                                await repo.upsert_instrument(
+                                    session,
+                                    commit=False,
+                                    exchange=s.exchange,
+                                    contract_symbol=s.contract_symbol,
+                                    base_symbol=s.base_symbol,
+                                    quote=s.quote,
+                                    multiplier=s.multiplier,
+                                    is_active=True,
+                                )
+                                await repo.insert_tick(
+                                    session,
+                                    {
+                                        "exchange": s.exchange,
+                                        "contract_symbol": s.contract_symbol,
+                                        "base_symbol": s.base_symbol,
+                                        "ts_utc": s.ts_utc,
+                                        "oi_usd": s.oi_usd,
+                                        "last_price": s.last_price,
+                                        "mark_price": s.mark_price,
+                                        "funding_rate": s.funding_rate,
+                                        "volume_24h": s.volume_24h,
+                                        "long_pct": s.long_pct,
+                                        "short_pct": s.short_pct,
+                                    },
+                                    commit=False,
+                                )
+                                async with snap_lock:
+                                    snapshots.append(s)
+                            await session.commit()
                 except Exception as e:  # noqa: BLE001
                     logger.error("collector %s failed: %s", name, e)
-                    async with self.session_factory() as session:
-                        health = await repo.update_exchange_health(
-                            session, name, success=False, error=str(e)
-                        )
-                        if (
-                            health.consecutive_failures >= cfg.monitoring.missing_data_intervals
-                            and not health.alerted
-                        ):
-                            await self._alert_admins(
-                                f"⚠ Exchange `{name}` no data for "
-                                f"{health.consecutive_failures} intervals: {e}"
+                    async with self._db_write_lock:
+                        async with self.session_factory() as session:
+                            health = await repo.update_exchange_health(
+                                session, name, success=False, error=str(e)
                             )
-                            health.alerted = True
-                            await session.commit()
+                            if (
+                                health.consecutive_failures
+                                >= cfg.monitoring.missing_data_intervals
+                                and not health.alerted
+                            ):
+                                await self._alert_admins(
+                                    f"⚠ Exchange `{name}` no data for "
+                                    f"{health.consecutive_failures} intervals: {e}"
+                                )
+                                health.alerted = True
+                                await session.commit()
 
         await asyncio.gather(*[collect_exchange(n, c) for n, c in collectors.items()])
 
@@ -312,16 +333,30 @@ class Pipeline:
                 by_window[f.window].append(f)
             for window, flist in by_window.items():
                 m = metrics_by_window.get(window) or primary_m
-                await persist_and_notify(
-                    bot=self.bot,
-                    session_factory=self.session_factory,
-                    cfg=cfg,
-                    base=snap.base_symbol,
-                    exchange=snap.exchange,
-                    window=window,
-                    fired=flist,
-                    metrics=m,
-                    s7_status=s7_status,
-                    flags=flags,
-                    ts=now_tick.ts_utc,
-                )
+
+                async def _notify(w=window, fl=flist, met=m):
+                    async with self._db_write_lock:
+                        await persist_and_notify(
+                            bot=self.bot,
+                            session_factory=self.session_factory,
+                            cfg=cfg,
+                            base=snap.base_symbol,
+                            exchange=snap.exchange,
+                            window=w,
+                            fired=fl,
+                            metrics=met,
+                            s7_status=s7_status,
+                            flags=flags,
+                            ts=now_tick.ts_utc,
+                        )
+
+                try:
+                    await with_db_retry(_notify)
+                except Exception as e:  # noqa: BLE001
+                    logger.error(
+                        "persist/notify failed %s %s %s: %s",
+                        snap.base_symbol,
+                        snap.exchange,
+                        window,
+                        e,
+                    )

@@ -163,7 +163,9 @@ async def users_watching(session: AsyncSession, base_symbol: str) -> list[User]:
     return list(result.scalars().unique().all())
 
 
-async def upsert_instrument(session: AsyncSession, **kwargs) -> Instrument:
+async def upsert_instrument(
+    session: AsyncSession, *, commit: bool = True, **kwargs
+) -> Instrument:
     result = await session.execute(
         select(Instrument).where(
             Instrument.exchange == kwargs["exchange"],
@@ -177,12 +179,15 @@ async def upsert_instrument(session: AsyncSession, **kwargs) -> Instrument:
     else:
         inst = Instrument(**kwargs)
         session.add(inst)
-    await session.commit()
-    await session.refresh(inst)
+    if commit:
+        await session.commit()
+        await session.refresh(inst)
+    else:
+        await session.flush()
     return inst
 
 
-async def insert_tick(session: AsyncSession, tick: dict) -> None:
+async def insert_tick(session: AsyncSession, tick: dict, *, commit: bool = True) -> None:
     existing = await session.execute(
         select(RawTick).where(
             RawTick.exchange == tick["exchange"],
@@ -193,7 +198,10 @@ async def insert_tick(session: AsyncSession, tick: dict) -> None:
     if existing.scalar_one_or_none():
         return
     session.add(RawTick(**tick))
-    await session.commit()
+    if commit:
+        await session.commit()
+    else:
+        await session.flush()
 
 
 async def latest_tick(
