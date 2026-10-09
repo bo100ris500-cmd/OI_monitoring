@@ -1,4 +1,4 @@
-"""Aster perpetual collector (Binance-compatible public API where available)."""
+"""Aster perpetual collector (Binance-compatible Futures API on asterdex.com)."""
 
 from __future__ import annotations
 
@@ -13,10 +13,9 @@ from app.core.normalize import base_from_contract, detect_multiplier, is_exclude
 
 logger = logging.getLogger(__name__)
 
-# Aster docs evolve; try fapi-compatible endpoints first, fallback to bybit-like.
+# Official Futures API base: https://docs.asterdex.com / asterdex.github.io
 ASTER_BASES = [
-    "https://fapi.aster.finance",
-    "https://api.aster.finance",
+    "https://fapi.asterdex.com",
 ]
 
 
@@ -52,17 +51,20 @@ class AsterCollector:
                 self._symbols = {
                     s["symbol"]
                     for s in data["symbols"]
-                    if s.get("contractType", "PERPETUAL") in ("PERPETUAL", None)
+                    if s.get("symbol")
+                    and s.get("status", "TRADING") == "TRADING"
+                    and s.get("contractType", "PERPETUAL") in ("PERPETUAL", None)
                     and s.get("quoteAsset", "USDT") in ("USDT", "USDC")
                 }
+                logger.info("aster: connected via %s (%d symbols)", b, len(self._symbols))
                 return b
-            # alternate: ticker list
             data2 = await self._try_get(b, "/fapi/v1/ticker/24hr")
             if isinstance(data2, list) and data2:
                 self._base = b
                 self._symbols = {x.get("symbol") for x in data2 if x.get("symbol")}
+                logger.info("aster: connected via %s ticker fallback (%d symbols)", b, len(self._symbols))
                 return b
-        logger.warning("aster: no reachable API base")
+        logger.warning("aster: no reachable API base among %s", ASTER_BASES)
         return None
 
     async def discover(self, bases: set[str]) -> list[MarketSnapshot]:

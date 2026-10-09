@@ -149,6 +149,18 @@ async def list_watchlist(session: AsyncSession, user_id: int) -> list[str]:
     return list(result.scalars().all())
 
 
+async def list_watchlist_entries(
+    session: AsyncSession, user_id: int
+) -> list[tuple[str, datetime | None]]:
+    """[(base_symbol, created_at), ...] по алфавиту тикера."""
+    result = await session.execute(
+        select(WatchlistItem.base_symbol, WatchlistItem.created_at)
+        .where(WatchlistItem.user_id == user_id)
+        .order_by(WatchlistItem.base_symbol)
+    )
+    return [(row[0], row[1]) for row in result.all()]
+
+
 async def union_watchlist_symbols(session: AsyncSession) -> list[str]:
     result = await session.execute(select(WatchlistItem.base_symbol).distinct())
     return sorted(result.scalars().all())

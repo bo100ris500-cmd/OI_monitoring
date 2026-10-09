@@ -18,8 +18,11 @@ def normalize_user_input(raw: str, cfg: NormalizationCfg) -> str:
             s = s[: -len(q)]
             break
     # strip contract multipliers like 1000PEPE → PEPE
+    # только числовые / 1M префиксы — НЕ одиночные буквы (иначе KGEN→GEN)
     for pref in sorted(cfg.strip_prefixes, key=len, reverse=True):
         p = pref.upper()
+        if not (p.isdigit() or p == "1M"):
+            continue
         if s.startswith(p) and len(s) > len(p) and s[len(p) :].isalpha():
             s = s[len(p) :]
             break

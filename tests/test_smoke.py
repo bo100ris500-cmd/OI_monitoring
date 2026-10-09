@@ -18,6 +18,8 @@ def test_normalize():
     assert normalize_user_input("BTC-USDT", cfg) == "BTC"
     assert normalize_user_input("$BTC", cfg) == "BTC"
     assert normalize_user_input("1000PEPEUSDT", cfg) == "PEPE"
+    assert normalize_user_input("Kgen", cfg) == "KGEN"
+    assert normalize_user_input("kgen", cfg) == "KGEN"
     assert base_from_contract("1000PEPEUSDT", cfg) == "PEPE"
     assert parse_window_to_seconds("4h") == 14400
 

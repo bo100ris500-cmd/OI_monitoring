@@ -29,7 +29,6 @@ normalization:
     - "10000"
     - "1000000"
     - "1M"
-    - "k"
   strip_quote_suffixes:
     - USDT
     - USDC

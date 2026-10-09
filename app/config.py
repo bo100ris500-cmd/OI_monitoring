@@ -29,7 +29,9 @@ class ResourcesCfg(BaseModel):
 
 
 class NormalizationCfg(BaseModel):
-    strip_prefixes: list[str] = Field(default_factory=lambda: ["1000", "10000", "1000000", "1M", "k"])
+    strip_prefixes: list[str] = Field(
+        default_factory=lambda: ["1000", "10000", "1000000", "1M"]
+    )
     strip_quote_suffixes: list[str] = Field(default_factory=lambda: ["USDT", "USDC"])
     multiplier_prefixes: dict[str, float] = Field(
         default_factory=lambda: {"1000": 1000, "10000": 10000, "1000000": 1000000, "1M": 1000000}
@@ -145,7 +147,7 @@ class AppConfig(BaseModel):
     resources: ResourcesCfg = Field(default_factory=ResourcesCfg)
     monitoring_mode: Literal["watchlist", "global"] = "watchlist"
     exchanges: list[str] = Field(
-        default_factory=lambda: ["binance", "bybit", "bitget", "hyperliquid", "aster"]
+        default_factory=lambda: ["binance", "bybit", "bitget", "hyperliquid"]
     )
     normalization: NormalizationCfg = Field(default_factory=NormalizationCfg)
     signals: SignalsCfg = Field(default_factory=SignalsCfg)

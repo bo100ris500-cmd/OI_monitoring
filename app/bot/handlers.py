@@ -21,7 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.bot.market_info import (
     format_check_report,
-    format_list_line,
+    format_list_report,
     lookup_base_on_exchanges,
 )
 from app.config import ConfigStore
@@ -193,15 +193,13 @@ def setup_bot_routes(
             user = await repo.get_or_create_user(
                 session, message.from_user.id, settings.admin_id_set
             )
-            items = await repo.list_watchlist(session, user.id)
-            exch_map = await repo.exchanges_map_for_bases(session, items)
-        if not items:
-            await message.answer("Список пуст. Добавьте тикер: /add")
+            entries = await repo.list_watchlist_entries(session, user.id)
+            bases = [e[0] for e in entries]
+            exch_map = await repo.exchanges_map_for_bases(session, bases)
+        if not entries:
+            await message.answer("Отслеживаются\n\n(пусто)\n\nДобавьте тикер: /add")
             return
-        lines = ["Мониторинг:", ""]
-        for sym in items:
-            lines.append(format_list_line(sym, exch_map.get(sym, [])))
-        await message.answer("\n".join(lines))
+        await message.answer(format_list_report(entries, exch_map))
 
     # —— admin ——
     @router.message(Command("admin_stats"))
