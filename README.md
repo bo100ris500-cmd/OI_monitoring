@@ -2,7 +2,7 @@
 
 Мониторинг открытого интереса (OI) по perpetual-контрактам с сигналами в Telegram.
 
-**Стек:** Python 3.12 · aiogram 3 · SQLAlchemy 2 · SQLite (WAL) · YAML-конфиг
+**Стек:** Python 3.12 · aiogram 3 · SQLAlchemy 2 · **PostgreSQL** · YAML-конфиг
 
 **Биржи:** Binance, Bybit, Bitget, Hyperliquid, Aster (только USDT/USDC perpetual)
 
@@ -152,7 +152,7 @@ python main.py
 |---|---|---|
 | `BOT_TOKEN` | `123456:AA...` | токен BotFather |
 | `ADMIN_IDS` | `123456789` | ID админов через запятую |
-| `DATABASE_URL` | `sqlite+aiosqlite:///./data/oi_bot.db` | путь к БД |
+| `DATABASE_URL` | `postgresql+asyncpg://oi_bot:oi_bot@127.0.0.1:5432/oi_bot` | PostgreSQL |
 | `CONFIG_PATH` | `./config.yaml` | путь к YAML |
 | `LOG_LEVEL` | `INFO` | уровень логов |
 
@@ -198,43 +198,46 @@ python enrich_prices.py -i result.csv -o result.csv
 
 ```bash
 sudo apt update
-sudo apt install -y python3.12 python3.12-venv git
-
-# пользователь без лишних прав
-sudo useradd -r -m -d /opt/oi-bot -s /bin/bash oi || true
-sudo mkdir -p /opt/oi-bot
-sudo chown -R oi:oi /opt/oi-bot
+sudo apt install -y python3.12 python3.12-venv git postgresql postgresql-contrib
 ```
+
+### 5.1b. PostgreSQL (обязательно)
+
+Скрипт: [`deploy/setup_postgres.sh`](deploy/setup_postgres.sh)
+
+```bash
+# из каталога проекта или вручную:
+sudo bash deploy/setup_postgres.sh
+# создаст роль/БД oi_bot / oi_bot (пароль по умолчанию oi_bot — смените на проде)
+```
+
+Вручную:
+
+```bash
+sudo -u postgres psql -c "CREATE USER oi_bot WITH PASSWORD 'oi_bot';"
+sudo -u postgres psql -c "CREATE DATABASE oi_bot OWNER oi_bot;"
+```
+
+Таблицы бот создаст сам при старте (`create_all`). Старый SQLite `data/oi_bot.db` можно удалить — миграция не нужна.
 
 ### 5.2. Клон с GitHub и установка
 
 ```bash
-sudo -u oi -H bash <<'EOF'
-cd /opt/oi-bot
-git clone https://github.com/<USER>/<REPO>.git .
-# если репо уже склонировано в подпапку — поправьте путь
+cd /root/OI_monitoring   # или /opt/oi-bot
+git pull origin main     # или git clone ...
 
-python3.12 -m venv .venv
-source .venv/bin/activate
-pip install --upgrade pip
+python3 -m venv venv     # у вас уже есть venv
+source venv/bin/activate
 pip install -r requirements.txt
 
-cp .env.example .env
-cp config.example.yaml config.yaml
-mkdir -p data
-EOF
-```
-
-Заполните секреты **только на сервере**:
-
-```bash
-sudo -u oi nano /opt/oi-bot/.env
+cp .env.example .env     # если ещё нет
+nano .env
 ```
 
 ```env
 BOT_TOKEN=вставьте_токен
 ADMIN_IDS=ваш_telegram_id
-DATABASE_URL=sqlite+aiosqlite:///./data/oi_bot.db
+DATABASE_URL=postgresql+asyncpg://oi_bot:oi_bot@127.0.0.1:5432/oi_bot
 CONFIG_PATH=./config.yaml
 LOG_LEVEL=INFO
 ```
@@ -242,7 +245,7 @@ LOG_LEVEL=INFO
 При необходимости подправьте пороги:
 
 ```bash
-sudo -u oi nano /opt/oi-bot/config.yaml
+nano config.yaml
 ```
 
 > На сервере с 4 GB **не** ставьте `monitoring_mode: global`.
@@ -294,7 +297,7 @@ sudo systemctl status oi-bot
 Бэкап БД перед крупным обновлением:
 
 ```bash
-sudo -u oi cp /opt/oi-bot/data/oi_bot.db /opt/oi-bot/data/oi_bot.db.bak-$(date +%F)
+sudo -u postgres pg_dump oi_bot > /root/oi_bot_$(date +%F).sql
 ```
 
 ### 5.5. Сеть и безопасность
@@ -423,7 +426,7 @@ ssh user@ваш_сервер
 **2. (Рекомендуется) бэкап БД**
 
 ```bash
-cp /opt/oi-bot/data/oi_bot.db /opt/oi-bot/data/oi_bot.db.bak-$(date +%F-%H%M)
+sudo -u postgres pg_dump oi_bot > /root/oi_bot_$(date +%F-%H%M).sql
 ```
 
 **3. Остановить бота → pull → зависимости → старт**
@@ -475,8 +478,8 @@ journalctl -u oi-bot -f
 |---|---|
 | `.env` | свой, в git не входит |
 | `config.yaml` | свой (в git только `config.example.yaml`) |
-| `data/oi_bot.db` | своя БД, не в git |
-| `.venv/` | не в git |
+| PostgreSQL `oi_bot` | своя БД на сервере |
+| `venv/` / `.venv/` | не в git |
 
 После обновления **не нужно** заново создавать `.env`, если путь к репо тот же.
 

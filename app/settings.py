@@ -13,7 +13,10 @@ class Settings(BaseSettings):
 
     bot_token: str = Field(alias="BOT_TOKEN")
     admin_ids: str = Field(default="", alias="ADMIN_IDS")
-    database_url: str = Field(default="sqlite+aiosqlite:///./data/oi_bot.db", alias="DATABASE_URL")
+    database_url: str = Field(
+        default="postgresql+asyncpg://oi_bot:oi_bot@127.0.0.1:5432/oi_bot",
+        alias="DATABASE_URL",
+    )
     config_path: str = Field(default="./config.yaml", alias="CONFIG_PATH")
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
 

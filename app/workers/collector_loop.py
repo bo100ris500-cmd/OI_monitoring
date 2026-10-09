@@ -22,6 +22,7 @@ from app.core.signals import evaluate_signals
 from app.core.timeutils import ensure_utc, utcnow
 from app.storage import repo
 from app.storage.db import with_db_retry
+from app.storage.write_lock import db_write_lock
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +39,6 @@ class Pipeline:
         self.config_store = config_store
         self._http: aiohttp.ClientSession | None = None
         self._running = False
-        self._db_write_lock = asyncio.Lock()
         # recent S1 events for S7: base -> list[(ts, exchange)]
         self._recent_s1: dict[str, list[tuple[datetime, str]]] = defaultdict(list)
 
@@ -104,7 +104,7 @@ class Pipeline:
                     prepared: list = []
                     for s in snaps:
                         need_confirm = False
-                        async with self._db_write_lock:
+                        async with db_write_lock():
                             async with self.session_factory() as session:
                                 prev = await repo.latest_tick(
                                     session, s.exchange, s.contract_symbol
@@ -129,7 +129,7 @@ class Pipeline:
                         else:
                             prepared.append(s)
 
-                    async with self._db_write_lock:
+                    async with db_write_lock():
                         async with self.session_factory() as session:
                             await repo.update_exchange_health(session, name, success=True)
                             for s in prepared:
@@ -165,7 +165,7 @@ class Pipeline:
                             await session.commit()
                 except Exception as e:  # noqa: BLE001
                     logger.error("collector %s failed: %s", name, e)
-                    async with self._db_write_lock:
+                    async with db_write_lock():
                         async with self.session_factory() as session:
                             health = await repo.update_exchange_health(
                                 session, name, success=False, error=str(e)
@@ -335,20 +335,19 @@ class Pipeline:
                 m = metrics_by_window.get(window) or primary_m
 
                 async def _notify(w=window, fl=flist, met=m):
-                    async with self._db_write_lock:
-                        await persist_and_notify(
-                            bot=self.bot,
-                            session_factory=self.session_factory,
-                            cfg=cfg,
-                            base=snap.base_symbol,
-                            exchange=snap.exchange,
-                            window=w,
-                            fired=fl,
-                            metrics=met,
-                            s7_status=s7_status,
-                            flags=flags,
-                            ts=now_tick.ts_utc,
-                        )
+                    await persist_and_notify(
+                        bot=self.bot,
+                        session_factory=self.session_factory,
+                        cfg=cfg,
+                        base=snap.base_symbol,
+                        exchange=snap.exchange,
+                        window=w,
+                        fired=fl,
+                        metrics=met,
+                        s7_status=s7_status,
+                        flags=flags,
+                        ts=now_tick.ts_utc,
+                    )
 
                 try:
                     await with_db_retry(_notify)

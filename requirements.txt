@@ -1,9 +1,11 @@
 aiogram>=3.13,<4
 aiohttp>=3.9,<4
 SQLAlchemy[asyncio]>=2.0,<3
+asyncpg>=0.29
 aiosqlite>=0.20
 pydantic>=2.5,<3
 pydantic-settings>=2.1
 PyYAML>=6.0
 python-dotenv>=1.0
 psutil>=5.9
+psycopg[binary]>=3.1

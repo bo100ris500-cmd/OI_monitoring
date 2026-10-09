@@ -15,6 +15,8 @@ from app.core.filters import cooldown_allows
 from app.core.metrics import WindowMetrics
 from app.core.signals import FiredSignal, SIGNAL_NAMES
 from app.storage import repo
+from app.storage.db import with_db_retry
+from app.storage.write_lock import db_write_lock
 
 logger = logging.getLogger(__name__)
 
@@ -110,66 +112,92 @@ async def persist_and_notify(
     flags: dict[str, Any],
     ts: datetime,
 ) -> None:
+    """Сохранение сигнала и рассылка.
+
+    Важно: Telegram send_message НЕ держит write-lock БД —
+    иначе SQLite получает database is locked.
+    """
     if not fired:
         return
     codes = sorted({f.code for f in fired})
     minute_ts = int(ts.timestamp()) // 60 * 60
     uid = make_signal_uid(base, exchange, window, codes, minute_ts)
-    payload = {
-        "metrics": metrics.__dict__,
-        "fired": [{"code": f.code, "window": f.window, "details": f.details} for f in fired],
-        "flags": flags,
-    }
-    # convert non-serializable
-    payload_json = json.dumps(payload, default=str)
+    payload_json = json.dumps(
+        {
+            "metrics": metrics.__dict__,
+            "fired": [{"code": f.code, "window": f.window, "details": f.details} for f in fired],
+            "flags": flags,
+        },
+        default=str,
+    )
+    text = format_signal_message(
+        base=base,
+        exchange=exchange,
+        window=window,
+        fired=fired,
+        metrics=metrics,
+        s7_status=s7_status,
+        flags=flags,
+        ts=ts,
+    )
+    oi_growth = metrics.oi_growth_pct
 
-    async with session_factory() as session:
-        sig = await repo.save_signal(
-            session,
-            signal_uid=uid,
-            base_symbol=base,
-            exchange=exchange,
-            window=window,
-            types_json=json.dumps(codes),
-            payload_json=payload_json,
-            ts_utc=ts,
-            s7_status=s7_status,
-            flags_json=json.dumps(flags),
-            price_at_signal=metrics.price_now,
-        )
-        if sig is None:
-            logger.debug("duplicate signal uid=%s", uid)
-            return
+    async def _claim() -> list[tuple[int, int, list[str]]]:
+        """Сохранить сигнал + зарезервировать delivery. Без сетевых вызовов."""
+        async with db_write_lock():
+            async with session_factory() as session:
+                sig = await repo.save_signal(
+                    session,
+                    signal_uid=uid,
+                    base_symbol=base,
+                    exchange=exchange,
+                    window=window,
+                    types_json=json.dumps(codes),
+                    payload_json=payload_json,
+                    ts_utc=ts,
+                    s7_status=s7_status,
+                    flags_json=json.dumps(flags),
+                    price_at_signal=metrics.price_now,
+                )
+                if sig is None:
+                    return []
+                users = await repo.users_watching(session, base)
+                claims: list[tuple[int, int, list[str]]] = []
+                for user in users:
+                    allowed_codes = []
+                    for code in codes:
+                        cd = await repo.get_cooldown(session, user.id, exchange, base, code)
+                        if cooldown_allows(
+                            cfg=cfg, cooldown=cd, signal_type=code, oi_growth=oi_growth
+                        ):
+                            allowed_codes.append(code)
+                    if not allowed_codes:
+                        continue
+                    if not await repo.mark_delivery(session, user.id, sig.id):
+                        continue
+                    claims.append((user.telegram_id, user.id, allowed_codes))
+                return claims
 
-        users = await repo.users_watching(session, base)
-        text = format_signal_message(
-            base=base,
-            exchange=exchange,
-            window=window,
-            fired=fired,
-            metrics=metrics,
-            s7_status=s7_status,
-            flags=flags,
-            ts=ts,
-        )
-        oi_growth = metrics.oi_growth_pct
-        for user in users:
-            # per-type cooldown
-            allowed_codes = []
-            for code in codes:
-                cd = await repo.get_cooldown(session, user.id, exchange, base, code)
-                if cooldown_allows(cfg=cfg, cooldown=cd, signal_type=code, oi_growth=oi_growth):
-                    allowed_codes.append(code)
-            if not allowed_codes:
-                continue
-            # still require at least one overlapping with fired after cooldown
-            if not await repo.mark_delivery(session, user.id, sig.id):
-                continue
-            try:
-                await bot.send_message(user.telegram_id, text)
-                for code in allowed_codes:
-                    await repo.upsert_cooldown(
-                        session, user.id, exchange, base, code, oi_growth or 0.0
-                    )
-            except Exception as e:  # noqa: BLE001
-                logger.error("notify user %s: %s", user.telegram_id, e)
+    claims = await with_db_retry(_claim, retries=12, delay=0.2)
+    if not claims:
+        return
+
+    for telegram_id, user_id, allowed_codes in claims:
+        try:
+            await bot.send_message(telegram_id, text)
+        except Exception as e:  # noqa: BLE001
+            logger.error("notify user %s: %s", telegram_id, e)
+            continue
+
+        async def _cooldown(uid_=user_id, codes_=allowed_codes) -> None:
+            async with db_write_lock():
+                async with session_factory() as session:
+                    for code in codes_:
+                        await repo.upsert_cooldown(
+                            session, uid_, exchange, base, code, oi_growth or 0.0
+                        )
+
+        try:
+            await with_db_retry(_cooldown, retries=8, delay=0.15)
+        except Exception as e:  # noqa: BLE001
+            logger.error("cooldown update user %s: %s", user_id, e)
