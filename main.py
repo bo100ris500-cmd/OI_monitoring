@@ -10,6 +10,7 @@ import sys
 from pathlib import Path
 
 from aiogram import Bot, Dispatcher
+from aiogram.fsm.storage.memory import MemoryStorage
 
 # ensure project root on path
 ROOT = Path(__file__).resolve().parent
@@ -56,7 +57,7 @@ async def amain() -> None:
         await repo.save_config_meta(session, config_store.hash)
 
     bot = Bot(token=settings.bot_token)
-    dp = Dispatcher()
+    dp = Dispatcher(storage=MemoryStorage())
     setup_bot_routes(dp, session_factory, config_store, settings)
 
     pipeline = Pipeline(bot, session_factory, config_store)

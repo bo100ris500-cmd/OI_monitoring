@@ -123,10 +123,22 @@ def test_config_hash(tmp_path):
     assert changed is True
 
 
+def test_ensure_utc_age():
+    from datetime import datetime
+    from app.core.timeutils import ensure_utc, utcnow
+
+    naive = datetime(2026, 10, 8, 12, 0, 0)  # as SQLite returns
+    aware = ensure_utc(naive)
+    assert aware.tzinfo is not None
+    age = (utcnow() - aware).total_seconds()
+    assert age > 0
+
+
 if __name__ == "__main__":
     test_normalize()
     test_robust_z()
     test_metrics_and_s1()
     test_filters_f1()
     test_cooldown()
+    test_ensure_utc_age()
     print("smoke ok")

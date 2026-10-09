@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections import defaultdict
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 
 import aiohttp
 import psutil
@@ -19,6 +19,7 @@ from app.core.metrics import compute_window_metrics, history_cutoff
 from app.core.normalize import parse_window_to_seconds
 from app.core.signal_manager import persist_and_notify
 from app.core.signals import evaluate_signals
+from app.core.timeutils import ensure_utc, utcnow
 from app.storage import repo
 
 logger = logging.getLogger(__name__)
@@ -193,10 +194,14 @@ class Pipeline:
             now_tick = await repo.latest_tick(session, snap.exchange, snap.contract_symbol)
             if not now_tick:
                 return
+            # SQLite returns naive datetimes — normalize before any arithmetic
+            now_tick.ts_utc = ensure_utc(now_tick.ts_utc)
             hist_since = history_cutoff(cfg)
             history = await repo.ticks_since(
                 session, snap.exchange, snap.contract_symbol, hist_since
             )
+            for t in history:
+                t.ts_utc = ensure_utc(t.ts_utc)
             metrics_by_window = {}
             for window in cfg.windows:
                 sec = parse_window_to_seconds(window)
@@ -204,6 +209,8 @@ class Pipeline:
                 before = await repo.tick_at_or_before(
                     session, snap.exchange, snap.contract_symbol, before_ts
                 )
+                if before:
+                    before.ts_utc = ensure_utc(before.ts_utc)
                 metrics_by_window[window] = compute_window_metrics(
                     now_tick, before, history, window, cfg, snap.exchange
                 )
@@ -211,9 +218,7 @@ class Pipeline:
             # pick primary window for filters: first configured
             primary_w = cfg.windows[0]
             primary_m = metrics_by_window[primary_w]
-            age = (datetime.now(timezone.utc) - now_tick.ts_utc).total_seconds()
-            if now_tick.ts_utc.tzinfo is None:
-                age = (datetime.now(timezone.utc) - now_tick.ts_utc.replace(tzinfo=timezone.utc)).total_seconds()
+            age = (utcnow() - now_tick.ts_utc).total_seconds()
 
             from sqlalchemy import select
             from app.storage.models import Instrument
@@ -240,7 +245,7 @@ class Pipeline:
                 return
 
             # S5 helpers
-            since_s1 = datetime.now(timezone.utc) - timedelta(hours=cfg.signals.S5.lookback_hours)
+            since_s1 = utcnow() - timedelta(hours=cfg.signals.S5.lookback_hours)
             prior_s1 = await repo.recent_s1_signals(
                 session, snap.base_symbol, snap.exchange, since_s1
             )
@@ -259,7 +264,7 @@ class Pipeline:
                 return
 
             # S7 tracking
-            now = datetime.now(timezone.utc)
+            now = utcnow()
             if any(f.code == "S1" for f in fired):
                 self._recent_s1[snap.base_symbol].append((now, snap.exchange))
                 # prune
@@ -288,9 +293,6 @@ class Pipeline:
 
             # F8
             share = None
-            if signal_bases:
-                # approximate using current cycle
-                pass
             f8 = apply_f8_flags(
                 cfg=cfg,
                 metrics_btc=btc_metrics_by_window.get(primary_w),  # type: ignore
@@ -321,5 +323,5 @@ class Pipeline:
                     metrics=m,
                     s7_status=s7_status,
                     flags=flags,
-                    ts=now_tick.ts_utc if now_tick.ts_utc.tzinfo else now_tick.ts_utc.replace(tzinfo=timezone.utc),
+                    ts=now_tick.ts_utc,
                 )

@@ -20,7 +20,7 @@
 
 Один процесс поднимает сразу:
 
-1. **Telegram-бот** — команды `/start`, `/add`, `/remove`, `/list`, `/help`, admin  
+1. **Telegram-бот** — команды `/start`, `/check`, `/add`, `/remove`, `/list`, admin  
 2. **Collector** — раз в `interval_sec` (по умолчанию 60 с) тянет OI/цену/funding с бирж по union watchlist  
 3. **Signal pipeline** — метрики, S1–S7, фильтры F1–F8, рассылка  
 4. **Post-factum worker** — цены через 5м / 15м / 1ч / 4ч / 1д после сигнала  
@@ -277,6 +277,8 @@ sudo systemctl stop oi-bot
 
 ### 5.4. Обновление с GitHub на сервере
 
+См. также отдельный блок **«Обновление репозитория и редеплой»** ниже (§10).
+
 ```bash
 sudo systemctl stop oi-bot
 sudo -u oi -H bash <<'EOF'
@@ -305,10 +307,11 @@ sudo -u oi cp /opt/oi-bot/data/oi_bot.db /opt/oi-bot/data/oi_bot.db.bak-$(date +
 ### 5.6. Проверка на проде
 
 1. `/start` в боте  
-2. `/add BTC`  
-3. `/admin_stats` — users, ticks, rss_mb  
-4. `/admin_status` — состояние бирж  
-5. В логах нет бесконечных traceback  
+2. `/add` → ввести `BTC`  
+3. `/list` — тикер и биржи  
+4. `/check` → ввести тикер — таблица OI  
+5. `/admin_stats` / `/admin_status`  
+6. В логах нет бесконечных traceback  
 
 ---
 
@@ -316,11 +319,11 @@ sudo -u oi cp /opt/oi-bot/data/oi_bot.db /opt/oi-bot/data/oi_bot.db.bak-$(date +
 
 | Команда | Кто | Действие |
 |---|---|---|
-| `/start` | все | регистрация |
-| `/add BTC` | все | добавить тикер в watchlist |
-| `/remove BTC` | все | **сразу** прекратить новые сигналы (история не удаляется) |
-| `/list` | все | показать watchlist |
-| `/help` | все | справка |
+| `/start` | все | регистрация и список команд |
+| `/check` | все | «Введите тикер» → биржи и OI |
+| `/add` | все | «Введите тикер» → добавить в мониторинг |
+| `/remove` | все | кнопки тикеров → удаление из watchlist |
+| `/list` | все | тикер + биржи, где доступен |
 | `/admin_stats` | админ | пользователи, тикеры, RAM, config_hash |
 | `/admin_symbols` | админ | активные base-символы |
 | `/admin_reload` | админ | перечитать YAML |
@@ -377,3 +380,113 @@ sudo -u oi cp /opt/oi-bot/data/oi_bot.db /opt/oi-bot/data/oi_bot.db.bak-$(date +
     → одно сообщение в Telegram
     → post-factum цены 5m…1d
 ```
+
+---
+
+## 10. Обновление репозитория и редеплой
+
+Подставьте свой путь на сервере: в инструкции ниже `/opt/oi-bot`  
+(если ставили в `/root/OI_monitoring` — замените путь везде).
+
+### A. На своём ПК (залить код в GitHub)
+
+```bash
+cd oi_analictick          # локальная папка проекта
+
+git status
+git add -A
+git status                # проверьте: нет .env, data/, .venv/, config.yaml
+
+git commit -m "Описание изменений"
+git push origin main
+```
+
+Если репозиторий ещё не подключён:
+
+```bash
+git init
+git add -A
+git commit -m "Initial commit"
+git branch -M main
+git remote add origin https://github.com/<USER>/<REPO>.git
+git push -u origin main
+```
+
+### B. На сервере (подтянуть и перезапустить)
+
+**1. SSH**
+
+```bash
+ssh user@ваш_сервер
+```
+
+**2. (Рекомендуется) бэкап БД**
+
+```bash
+cp /opt/oi-bot/data/oi_bot.db /opt/oi-bot/data/oi_bot.db.bak-$(date +%F-%H%M)
+```
+
+**3. Остановить бота → pull → зависимости → старт**
+
+Если сервис systemd `oi-bot`:
+
+```bash
+sudo systemctl stop oi-bot
+
+cd /opt/oi-bot
+sudo -u oi git pull origin main
+# если репо от root:
+# cd /root/OI_monitoring && git pull origin main
+
+source .venv/bin/activate    # или: sudo -u oi -H bash -c 'cd /opt/oi-bot && source .venv/bin/activate && pip install -r requirements.txt'
+pip install -r requirements.txt
+
+sudo systemctl start oi-bot
+sudo systemctl status oi-bot
+```
+
+Если бот запущен **не** через systemd (вручную / screen / другой unit) — остановите тот процесс и снова:
+
+```bash
+cd /путь/к/проекту
+git pull origin main
+source .venv/bin/activate
+pip install -r requirements.txt
+python main.py
+# или ваш systemctl restart <имя>
+```
+
+**4. Проверка**
+
+```bash
+journalctl -u oi-bot -f
+```
+
+В Telegram:
+
+- `/start`
+- `/check` → тикер
+- `/list`
+- нет ошибок `offset-naive` / traceback каждую минуту
+
+### C. Что не затирается при `git pull`
+
+| Файл / папка | На сервере |
+|---|---|
+| `.env` | свой, в git не входит |
+| `config.yaml` | свой (в git только `config.example.yaml`) |
+| `data/oi_bot.db` | своя БД, не в git |
+| `.venv/` | не в git |
+
+После обновления **не нужно** заново создавать `.env`, если путь к репо тот же.
+
+### D. Только смена порогов в `config.yaml`
+
+Рестарт не обязателен:
+
+```bash
+nano /opt/oi-bot/config.yaml
+# в боте: /admin_reload
+```
+
+Смена `.env` (токен и т.п.) — нужен `systemctl restart oi-bot`.

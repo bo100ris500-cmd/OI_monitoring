@@ -61,6 +61,85 @@ async def remove_watchlist(session: AsyncSession, user_id: int, base_symbol: str
     return True
 
 
+async def remove_watchlist_with_user_data(
+    session: AsyncSession, user_id: int, base_symbol: str
+) -> bool:
+    """Удаляет тикер из watchlist пользователя + cooldown и delivery по этому тикеру.
+    Общие raw_ticks / signals не трогает (нужны другим пользователям).
+    """
+    result = await session.execute(
+        select(WatchlistItem).where(
+            WatchlistItem.user_id == user_id, WatchlistItem.base_symbol == base_symbol
+        )
+    )
+    item = result.scalar_one_or_none()
+    if not item:
+        return False
+    await session.delete(item)
+
+    await session.execute(
+        delete(CooldownState).where(
+            CooldownState.user_id == user_id,
+            CooldownState.base_symbol == base_symbol,
+        )
+    )
+
+    signal_ids = (
+        await session.execute(select(Signal.id).where(Signal.base_symbol == base_symbol))
+    ).scalars().all()
+    if signal_ids:
+        await session.execute(
+            delete(UserSignalDelivery).where(
+                UserSignalDelivery.user_id == user_id,
+                UserSignalDelivery.signal_id.in_(signal_ids),
+            )
+        )
+
+    await session.commit()
+    return True
+
+
+async def exchanges_for_base(session: AsyncSession, base_symbol: str) -> list[str]:
+    """Биржи, где инструмент уже известен (из instruments / последних тиков)."""
+    result = await session.execute(
+        select(Instrument.exchange)
+        .where(Instrument.base_symbol == base_symbol, Instrument.is_active.is_(True))
+        .distinct()
+    )
+    exchanges = sorted({x.lower() for x in result.scalars().all()})
+    if exchanges:
+        return [e.capitalize() for e in exchanges]
+    # fallback: raw ticks
+    result2 = await session.execute(
+        select(RawTick.exchange)
+        .where(RawTick.base_symbol == base_symbol)
+        .distinct()
+    )
+    return [e.capitalize() for e in sorted({x.lower() for x in result2.scalars().all()})]
+
+
+async def exchanges_map_for_bases(
+    session: AsyncSession, bases: list[str]
+) -> dict[str, list[str]]:
+    out: dict[str, list[str]] = {b: [] for b in bases}
+    if not bases:
+        return out
+    result = await session.execute(
+        select(Instrument.base_symbol, Instrument.exchange).where(
+            Instrument.base_symbol.in_(bases),
+            Instrument.is_active.is_(True),
+        )
+    )
+    for base, exchange in result.all():
+        out.setdefault(base, [])
+        name = exchange.capitalize()
+        if name not in out[base]:
+            out[base].append(name)
+    for b in out:
+        out[b].sort()
+    return out
+
+
 async def list_watchlist(session: AsyncSession, user_id: int) -> list[str]:
     result = await session.execute(
         select(WatchlistItem.base_symbol)
