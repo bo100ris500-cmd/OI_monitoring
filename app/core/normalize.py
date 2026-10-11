@@ -80,4 +80,6 @@ def parse_window_to_seconds(window: str) -> int:
         return int(w[:-1]) * 3600
     if w.endswith("d"):
         return int(w[:-1]) * 86400
+    if w.endswith("w"):
+        return int(w[:-1]) * 604800
     raise ValueError(f"Unknown window: {window}")

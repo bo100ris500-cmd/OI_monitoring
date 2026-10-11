@@ -142,7 +142,7 @@ class MonitoringCfg(BaseModel):
 
 class AppConfig(BaseModel):
     collector: CollectorCfg = Field(default_factory=CollectorCfg)
-    windows: list[str] = Field(default_factory=lambda: ["1h", "4h", "24h"])
+    windows: list[str] = Field(default_factory=lambda: ["5m", "15m", "1h", "4h", "24h"])
     history: HistoryCfg = Field(default_factory=HistoryCfg)
     resources: ResourcesCfg = Field(default_factory=ResourcesCfg)
     monitoring_mode: Literal["watchlist", "global"] = "watchlist"

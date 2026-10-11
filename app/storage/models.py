@@ -48,6 +48,31 @@ class WatchlistItem(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     user: Mapped[User] = relationship(back_populates="watchlist")
+    bindings: Mapped[list["WatchlistBinding"]] = relationship(
+        back_populates="watchlist_item", cascade="all, delete-orphan"
+    )
+
+
+class WatchlistBinding(Base):
+    """Привязка (биржа, локальный тикер) к записи watchlist.
+
+    Несколько тикеров с разными именами считаются одной монетой (агрегация OI).
+    Если у WatchlistItem нет bindings — мониторинг по base_symbol на всех биржах.
+    """
+
+    __tablename__ = "watchlist_bindings"
+    __table_args__ = (
+        UniqueConstraint("watchlist_id", "exchange", name="uq_wl_binding_ex"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    watchlist_id: Mapped[int] = mapped_column(
+        ForeignKey("watchlist.id", ondelete="CASCADE"), index=True
+    )
+    exchange: Mapped[str] = mapped_column(String(32))
+    base_symbol: Mapped[str] = mapped_column(String(64), index=True)
+
+    watchlist_item: Mapped[WatchlistItem] = relationship(back_populates="bindings")
 
 
 class Instrument(Base):

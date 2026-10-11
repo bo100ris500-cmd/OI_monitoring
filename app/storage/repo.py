@@ -17,6 +17,7 @@ from app.storage.models import (
     Signal,
     User,
     UserSignalDelivery,
+    WatchlistBinding,
     WatchlistItem,
     utcnow,
 )
@@ -47,6 +48,121 @@ async def add_watchlist(session: AsyncSession, user_id: int, base_symbol: str) -
     return True
 
 
+async def get_watchlist_item(
+    session: AsyncSession, user_id: int, base_symbol: str
+) -> WatchlistItem | None:
+    result = await session.execute(
+        select(WatchlistItem).where(
+            WatchlistItem.user_id == user_id, WatchlistItem.base_symbol == base_symbol
+        )
+    )
+    return result.scalar_one_or_none()
+
+
+async def add_watchlist_with_bindings(
+    session: AsyncSession,
+    user_id: int,
+    display_symbol: str,
+    pairs: list[tuple[str, str]],
+) -> tuple[str, bool]:
+    """Добавить группу (биржа, тикер). OI считается как одна монета (display_symbol).
+
+    pairs: [(exchange, base_symbol), ...]
+    Returns: (display_symbol, created_new_item)
+    """
+    display_symbol = display_symbol.upper()
+    item = await get_watchlist_item(session, user_id, display_symbol)
+    created = False
+    if not item:
+        # если display уже занят другим тикером — всё равно создаём под первым тикером
+        item = WatchlistItem(user_id=user_id, base_symbol=display_symbol)
+        session.add(item)
+        await session.flush()
+        created = True
+    existing = (
+        await session.execute(
+            select(WatchlistBinding).where(WatchlistBinding.watchlist_id == item.id)
+        )
+    ).scalars().all()
+    by_ex = {b.exchange.lower(): b for b in existing}
+    for exchange, ticker in pairs:
+        ex = exchange.lower()
+        tick = ticker.upper()
+        if ex in by_ex:
+            by_ex[ex].base_symbol = tick
+        else:
+            session.add(
+                WatchlistBinding(watchlist_id=item.id, exchange=ex, base_symbol=tick)
+            )
+    await session.commit()
+    return display_symbol, created
+
+
+async def add_watchlist_exchange(
+    session: AsyncSession, user_id: int, base_symbol: str, exchange: str
+) -> str:
+    """Добавить тикер на конкретной бирже. Возвращает статус-текст."""
+    base_symbol = base_symbol.upper()
+    exchange = exchange.lower()
+    item = await get_watchlist_item(session, user_id, base_symbol)
+    if item is None:
+        item = WatchlistItem(user_id=user_id, base_symbol=base_symbol)
+        session.add(item)
+        await session.flush()
+        session.add(
+            WatchlistBinding(
+                watchlist_id=item.id, exchange=exchange, base_symbol=base_symbol
+            )
+        )
+        await session.commit()
+        return "added_exchange"
+    bindings = (
+        await session.execute(
+            select(WatchlistBinding).where(WatchlistBinding.watchlist_id == item.id)
+        )
+    ).scalars().all()
+    if not bindings:
+        # уже мониторится на всех биржах
+        return "already_all"
+    for b in bindings:
+        if b.exchange.lower() == exchange:
+            return "already_exchange"
+    session.add(
+        WatchlistBinding(
+            watchlist_id=item.id, exchange=exchange, base_symbol=base_symbol
+        )
+    )
+    await session.commit()
+    return "added_exchange"
+
+
+async def add_watchlist_all_exchanges(
+    session: AsyncSession, user_id: int, base_symbol: str, exchanges: list[str]
+) -> str:
+    """Добавить тикер на все биржи (без bindings = любое совпадение имени).
+
+    Если запись уже была с узкими bindings — снимаем ограничения (удаляем bindings).
+    """
+    del exchanges  # намеренно: «все» = без привязок к списку
+    base_symbol = base_symbol.upper()
+    item = await get_watchlist_item(session, user_id, base_symbol)
+    if item is None:
+        session.add(WatchlistItem(user_id=user_id, base_symbol=base_symbol))
+        await session.commit()
+        return "added"
+    bindings = (
+        await session.execute(
+            select(WatchlistBinding).where(WatchlistBinding.watchlist_id == item.id)
+        )
+    ).scalars().all()
+    if not bindings:
+        return "already"
+    for b in bindings:
+        await session.delete(b)
+    await session.commit()
+    return "added"
+
+
 async def remove_watchlist(session: AsyncSession, user_id: int, base_symbol: str) -> bool:
     result = await session.execute(
         select(WatchlistItem).where(
@@ -75,17 +191,30 @@ async def remove_watchlist_with_user_data(
     item = result.scalar_one_or_none()
     if not item:
         return False
+
+    # cooldown по display и по локальным тикерам bindings
+    alias_bases = {base_symbol}
+    bindings = (
+        await session.execute(
+            select(WatchlistBinding).where(WatchlistBinding.watchlist_id == item.id)
+        )
+    ).scalars().all()
+    for b in bindings:
+        alias_bases.add(b.base_symbol.upper())
+
     await session.delete(item)
 
     await session.execute(
         delete(CooldownState).where(
             CooldownState.user_id == user_id,
-            CooldownState.base_symbol == base_symbol,
+            CooldownState.base_symbol.in_(sorted(alias_bases)),
         )
     )
 
     signal_ids = (
-        await session.execute(select(Signal.id).where(Signal.base_symbol == base_symbol))
+        await session.execute(
+            select(Signal.id).where(Signal.base_symbol.in_(sorted(alias_bases)))
+        )
     ).scalars().all()
     if signal_ids:
         await session.execute(
@@ -162,8 +291,29 @@ async def list_watchlist_entries(
 
 
 async def union_watchlist_symbols(session: AsyncSession) -> list[str]:
+    """Все base_symbol для коллектора: display + локальные тикеры bindings."""
     result = await session.execute(select(WatchlistItem.base_symbol).distinct())
-    return sorted(result.scalars().all())
+    bases = {x.upper() for x in result.scalars().all()}
+    result2 = await session.execute(select(WatchlistBinding.base_symbol).distinct())
+    bases.update(x.upper() for x in result2.scalars().all())
+    return sorted(bases)
+
+
+async def watchlist_bindings_map(
+    session: AsyncSession,
+) -> dict[tuple[str, str], str]:
+    """(exchange, local_base) -> display_symbol для групп с bindings."""
+    result = await session.execute(
+        select(
+            WatchlistBinding.exchange,
+            WatchlistBinding.base_symbol,
+            WatchlistItem.base_symbol,
+        ).join(WatchlistItem, WatchlistItem.id == WatchlistBinding.watchlist_id)
+    )
+    out: dict[tuple[str, str], str] = {}
+    for exchange, local, display in result.all():
+        out[(exchange.lower(), local.upper())] = display.upper()
+    return out
 
 
 async def users_watching(session: AsyncSession, base_symbol: str) -> list[User]:
@@ -173,6 +323,133 @@ async def users_watching(session: AsyncSession, base_symbol: str) -> list[User]:
         .where(WatchlistItem.base_symbol == base_symbol)
     )
     return list(result.scalars().unique().all())
+
+
+async def users_watching_on_exchange(
+    session: AsyncSession, base_symbol: str, exchange: str
+) -> list[tuple[User, str]]:
+    """Пользователи, следящие за тикером на бирже.
+
+    Returns: [(user, display_symbol), ...]
+    """
+    base_symbol = base_symbol.upper()
+    exchange = exchange.lower()
+    seen: dict[int, tuple[User, str]] = {}
+
+    # 1) прямой watchlist по display/base без bindings или с совпадающим binding
+    items = (
+        await session.execute(
+            select(WatchlistItem).where(WatchlistItem.base_symbol == base_symbol)
+        )
+    ).scalars().all()
+    for item in items:
+        bindings = (
+            await session.execute(
+                select(WatchlistBinding).where(WatchlistBinding.watchlist_id == item.id)
+            )
+        ).scalars().all()
+        if not bindings or any(
+            b.exchange.lower() == exchange and b.base_symbol.upper() == base_symbol
+            for b in bindings
+        ):
+            user = await session.get(User, item.user_id)
+            if user:
+                seen[user.id] = (user, item.base_symbol.upper())
+
+    # 2) alias: binding (exchange, local ticker) -> display
+    binds = (
+        await session.execute(
+            select(WatchlistBinding, WatchlistItem)
+            .join(WatchlistItem, WatchlistItem.id == WatchlistBinding.watchlist_id)
+            .where(
+                WatchlistBinding.exchange == exchange,
+                WatchlistBinding.base_symbol == base_symbol,
+            )
+        )
+    ).all()
+    for binding, item in binds:
+        user = await session.get(User, item.user_id)
+        if user:
+            seen[user.id] = (user, item.base_symbol.upper())
+
+    return list(seen.values())
+
+
+async def resolve_report_legs(
+    session: AsyncSession, user_id: int | None, ticker: str
+) -> tuple[str, list[tuple[str, str]]]:
+    """Для /otchet: (display, [(exchange, local_base), ...])."""
+    ticker = ticker.upper()
+    if user_id is not None:
+        # группа пользователя, где ticker = display или один из bindings
+        item = await get_watchlist_item(session, user_id, ticker)
+        if item is None:
+            bind_hit = (
+                await session.execute(
+                    select(WatchlistBinding, WatchlistItem)
+                    .join(WatchlistItem, WatchlistItem.id == WatchlistBinding.watchlist_id)
+                    .where(
+                        WatchlistItem.user_id == user_id,
+                        WatchlistBinding.base_symbol == ticker,
+                    )
+                )
+            ).first()
+            if bind_hit:
+                _b, item = bind_hit
+        if item is not None:
+            bindings = (
+                await session.execute(
+                    select(WatchlistBinding).where(WatchlistBinding.watchlist_id == item.id)
+                )
+            ).scalars().all()
+            if bindings:
+                legs = [(b.exchange.lower(), b.base_symbol.upper()) for b in bindings]
+                return item.base_symbol.upper(), legs
+
+    # все активные инструменты с этим base
+    result = await session.execute(
+        select(Instrument.exchange, Instrument.base_symbol).where(
+            Instrument.base_symbol == ticker, Instrument.is_active.is_(True)
+        )
+    )
+    legs = sorted({(ex.lower(), base.upper()) for ex, base in result.all()})
+    if not legs:
+        # fallback по последним тикам
+        result2 = await session.execute(
+            select(RawTick.exchange, RawTick.base_symbol)
+            .where(RawTick.base_symbol == ticker)
+            .distinct()
+        )
+        legs = sorted({(ex.lower(), base.upper()) for ex, base in result2.all()})
+    return ticker, legs
+
+
+async def latest_tick_for_base(
+    session: AsyncSession, exchange: str, base_symbol: str
+) -> RawTick | None:
+    result = await session.execute(
+        select(RawTick)
+        .where(RawTick.exchange == exchange, RawTick.base_symbol == base_symbol)
+        .order_by(RawTick.ts_utc.desc())
+        .limit(1)
+    )
+    return result.scalar_one_or_none()
+
+
+async def tick_at_or_before_base(
+    session: AsyncSession, exchange: str, base_symbol: str, ts: datetime
+) -> RawTick | None:
+    result = await session.execute(
+        select(RawTick)
+        .where(
+            RawTick.exchange == exchange,
+            RawTick.base_symbol == base_symbol,
+            RawTick.ts_utc <= ts,
+        )
+        .order_by(RawTick.ts_utc.desc())
+        .limit(1)
+    )
+    return result.scalar_one_or_none()
 
 
 async def upsert_instrument(

@@ -91,6 +91,19 @@ class BitgetCollector:
                 oi_usd = float(t["openInterestUsd"])
             elif oi_usd and (mark or last):
                 oi_usd = oi_usd * (mark or last) * detect_multiplier(contract_symbol, self.norm)
+            long_pct = short_pct = None
+            try:
+                ls = await self._get(
+                    "/api/v2/mix/market/long-short",
+                    {"productType": pt, "symbol": contract_symbol},
+                )
+                row = ls[0] if isinstance(ls, list) and ls else ls
+                if row:
+                    lr = float(row.get("longRatio") or 0)
+                    long_pct = lr * 100 if lr <= 1 else lr
+                    short_pct = 100.0 - long_pct
+            except Exception:  # noqa: BLE001
+                pass
             return MarketSnapshot(
                 exchange=self.name,
                 contract_symbol=contract_symbol,
@@ -103,8 +116,8 @@ class BitgetCollector:
                 mark_price=mark,
                 funding_rate=funding,
                 volume_24h=vol,
-                long_pct=None,
-                short_pct=None,
+                long_pct=long_pct,
+                short_pct=short_pct,
             )
         except Exception as e:  # noqa: BLE001
             logger.warning("bitget fetch %s: %s", contract_symbol, e)

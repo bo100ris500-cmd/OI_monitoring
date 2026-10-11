@@ -187,9 +187,13 @@ class Pipeline:
         # Evaluate signals per snapshot
         signal_bases: set[str] = set()
         btc_metrics_by_window: dict[str, object] = {}
+        async with self.session_factory() as session:
+            alias_map = await repo.watchlist_bindings_map(session)
 
         for snap in snapshots:
-            await self._evaluate_snapshot(cfg, snap, signal_bases, btc_metrics_by_window)
+            await self._evaluate_snapshot(
+                cfg, snap, signal_bases, btc_metrics_by_window, alias_map
+            )
 
         # cleanup collectors
         for c in collectors.values():
@@ -210,7 +214,12 @@ class Pipeline:
         snap,
         signal_bases: set[str],
         btc_metrics_by_window: dict,
+        alias_map: dict[tuple[str, str], str] | None = None,
     ) -> None:
+        alias_map = alias_map or {}
+        group_key = alias_map.get(
+            (snap.exchange.lower(), snap.base_symbol.upper()), snap.base_symbol.upper()
+        )
         async with self.session_factory() as session:
             now_tick = await repo.latest_tick(session, snap.exchange, snap.contract_symbol)
             if not now_tick:
@@ -236,8 +245,8 @@ class Pipeline:
                     now_tick, before, history, window, cfg, snap.exchange
                 )
 
-            # pick primary window for filters: first configured
-            primary_w = cfg.windows[0]
+            # primary для фильтров/S7: предпочитаем 1h, иначе первое окно
+            primary_w = "1h" if "1h" in metrics_by_window else cfg.windows[0]
             primary_m = metrics_by_window[primary_w]
             age = (utcnow() - now_tick.ts_utc).total_seconds()
 
@@ -284,17 +293,16 @@ class Pipeline:
             if not fired:
                 return
 
-            # S7 tracking
+            # S7 tracking — алиасы одной монеты считаются вместе
             now = utcnow()
             if any(f.code == "S1" for f in fired):
-                self._recent_s1[snap.base_symbol].append((now, snap.exchange))
-                # prune
+                self._recent_s1[group_key].append((now, snap.exchange))
                 win = timedelta(minutes=cfg.signals.S7.confirmation_window_min)
-                self._recent_s1[snap.base_symbol] = [
-                    x for x in self._recent_s1[snap.base_symbol] if now - x[0] <= win
+                self._recent_s1[group_key] = [
+                    x for x in self._recent_s1[group_key] if now - x[0] <= win
                 ]
 
-            exchanges_hit = {ex for _, ex in self._recent_s1.get(snap.base_symbol, [])}
+            exchanges_hit = {ex for _, ex in self._recent_s1.get(group_key, [])}
             s7_status = (
                 "confirmed"
                 if len(exchanges_hit) >= cfg.signals.S7.exchanges_required

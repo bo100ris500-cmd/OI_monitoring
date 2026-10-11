@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any
 
 from aiogram import Bot
@@ -42,6 +42,16 @@ def _fmt_pct(v: float | None, signed: bool = True) -> str:
     return f"{v:.2f}%"
 
 
+def _fmt_price(v: float | None) -> str:
+    if v is None:
+        return "—"
+    if abs(v) >= 1000:
+        return f"{v:,.2f}"
+    if abs(v) >= 1:
+        return f"{v:.4f}"
+    return f"{v:.6g}"
+
+
 def format_signal_message(
     *,
     base: str,
@@ -53,44 +63,31 @@ def format_signal_message(
     flags: dict[str, Any],
     ts: datetime,
 ) -> str:
+    del flags, ts  # reserved for future flags; not shown in compact template
     codes = sorted({f.code for f in fired})
     titles = " + ".join(codes)
     regime = next((f.details.get("regime") for f in fired if f.code == "S2"), None)
+    names = " + ".join(f"{c} {SIGNAL_NAMES.get(c, '')}" for c in codes)
+    status = "confirmed" if s7_status == "confirmed" else "new"
     lines = [
-        f"🚨 {titles}",
-        f"{base} · {window.upper()}",
+        f"🚨 {titles} {base} · {window.upper()} {exchange.capitalize()}",
+        names,
         f"OI       {_fmt_pct(metrics.oi_growth_pct)}   {_fmt_usd(metrics.oi_before)} → {_fmt_usd(metrics.oi_now)}",
-        f"Price     {_fmt_pct(metrics.price_change_pct)}",
+        (
+            f"Price     {_fmt_pct(metrics.price_change_pct)} "
+            f"{_fmt_price(metrics.price_before)} → {_fmt_price(metrics.price_now)}"
+        ),
+        f"Funding   {_fmt_pct(metrics.funding_8h)}",
     ]
-    if metrics.oi_z is not None:
-        lines.append(f"OI Z       {metrics.oi_z:.2f}")
-    if metrics.oi_pctl is not None:
-        lines.append(f"Pctl      {metrics.oi_pctl:.1f}%")
-    lines.append(f"Funding   {_fmt_pct(metrics.funding_8h)}")
     if metrics.long_pct is not None:
         short = metrics.short_pct if metrics.short_pct is not None else 100 - metrics.long_pct
         lines.append(f"L/S       {metrics.long_pct:.1f} / {short:.1f}")
     lines.append(f"Vol 24h   {_fmt_usd(metrics.volume_24h)}")
     if metrics.oi_to_volume is not None:
         lines.append(f"OI/Vol    {metrics.oi_to_volume:.3f}")
-    lines.append(f"📍 {exchange.capitalize()}")
-    if s7_status == "confirmed":
-        lines.append("🌐 Confirmed")
-    else:
-        lines.append("🌐 Local")
     if regime:
         lines.append(regime)
-    if flags.get("new_history"):
-        lines.append("⚠ new_history")
-    if flags.get("new_listing"):
-        lines.append("⚠ new_listing")
-    if flags.get("market_wide"):
-        lines.append("⚠ market_wide")
-    if ts.tzinfo is None:
-        ts = ts.replace(tzinfo=timezone.utc)
-    lines.append(ts.strftime("%d.%m.%Y %H:%M UTC"))
-    names = ", ".join(f"{c} {SIGNAL_NAMES.get(c, '')}" for c in codes)
-    lines.insert(1, names)
+    lines.append(status)
     return "\n".join(lines)
 
 
@@ -161,12 +158,14 @@ async def persist_and_notify(
                 )
                 if sig is None:
                     return []
-                users = await repo.users_watching(session, base)
-                claims: list[tuple[int, int, list[str]]] = []
-                for user in users:
+                watchers = await repo.users_watching_on_exchange(session, base, exchange)
+                claims: list[tuple[int, int, list[str], str]] = []
+                for user, display in watchers:
                     allowed_codes = []
                     for code in codes:
-                        cd = await repo.get_cooldown(session, user.id, exchange, base, code)
+                        cd = await repo.get_cooldown(
+                            session, user.id, exchange, display, code
+                        )
                         if cooldown_allows(
                             cfg=cfg, cooldown=cd, signal_type=code, oi_growth=oi_growth
                         ):
@@ -175,26 +174,38 @@ async def persist_and_notify(
                         continue
                     if not await repo.mark_delivery(session, user.id, sig.id):
                         continue
-                    claims.append((user.telegram_id, user.id, allowed_codes))
+                    claims.append((user.telegram_id, user.id, allowed_codes, display))
                 return claims
 
     claims = await with_db_retry(_claim, retries=12, delay=0.2)
     if not claims:
         return
 
-    for telegram_id, user_id, allowed_codes in claims:
+    for telegram_id, user_id, allowed_codes, display in claims:
+        msg = text
+        if display != base:
+            msg = format_signal_message(
+                base=display,
+                exchange=exchange,
+                window=window,
+                fired=fired,
+                metrics=metrics,
+                s7_status=s7_status,
+                flags=flags,
+                ts=ts,
+            )
         try:
-            await bot.send_message(telegram_id, text)
+            await bot.send_message(telegram_id, msg)
         except Exception as e:  # noqa: BLE001
             logger.error("notify user %s: %s", telegram_id, e)
             continue
 
-        async def _cooldown(uid_=user_id, codes_=allowed_codes) -> None:
+        async def _cooldown(uid_=user_id, codes_=allowed_codes, disp_=display) -> None:
             async with db_write_lock():
                 async with session_factory() as session:
                     for code in codes_:
                         await repo.upsert_cooldown(
-                            session, uid_, exchange, base, code, oi_growth or 0.0
+                            session, uid_, exchange, disp_, code, oi_growth or 0.0
                         )
 
         try:
